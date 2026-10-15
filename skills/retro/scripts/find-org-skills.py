@@ -495,6 +495,7 @@ def codex_catalogue(codex_home: Path) -> list[dict[str, Any]]:
             text=True,
             check=True,
             timeout=30,
+            env={**os.environ, "CODEX_HOME": str(codex_home)},
         )
         plugins = json.loads(result.stdout)
         if not isinstance(plugins, dict):

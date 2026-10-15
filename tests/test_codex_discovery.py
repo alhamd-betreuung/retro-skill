@@ -144,6 +144,7 @@ class CodexDiscoveryTest(unittest.TestCase):
         with patch.object(discovery.subprocess, "run", return_value=result) as run:
             discovery.codex_catalogue(self.home)
         self.assertEqual(run.call_args.args[0], ["codex", "plugin", "list", "--json"])
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], str(self.home))
 
     def test_malformed_cli_payload_falls_back_without_claiming_full_coverage(self):
         self.skill(self.home / "skills/local/SKILL.md", "local", "Local")

@@ -540,7 +540,11 @@ def codex_catalogue(codex_home: Path, user_home: Path) -> list[dict[str, Any]]:
         ):
             raise TypeError("catalogue groups must be arrays")
     except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
-        detail = (getattr(exc, "stderr", None) or "").strip()
+        detail = getattr(exc, "stderr", None) or ""
+        # TimeoutExpired carries bytes even with text=True.
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        detail = detail.strip()
         print(
             f"Codex plugin catalogue unavailable ({type(exc).__name__}); standalone skills only."
             + (f" CLI said: {detail}" if detail else ""),

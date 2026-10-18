@@ -185,6 +185,30 @@ class CodexDiscoveryTest(unittest.TestCase):
         written = "".join(c.args[0] for c in stderr.write.call_args_list)
         self.assertIn("not logged in", written)
 
+    def test_timeout_stderr_is_decoded(self):
+        error = subprocess.TimeoutExpired(["codex"], 30, output=b"", stderr=b"warn\n")
+        with (
+            patch.object(discovery.subprocess, "run", side_effect=error),
+            patch("sys.stderr") as stderr,
+        ):
+            discovery.codex_catalogue(self.home, self.home.parent)
+        written = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn("CLI said: warn", written)
+
+    def test_partial_cli_answer_keeps_its_plugins(self):
+        plugin = self.cached_plugin("solo", ["solo"])
+        result = subprocess.CompletedProcess(
+            [], 0, json.dumps({"installed": [plugin], "available": []}), "warning\n"
+        )
+        with (
+            patch.object(discovery.subprocess, "run", return_value=result),
+            patch("sys.stderr"),
+        ):
+            rows = discovery.codex_catalogue(self.home, self.home.parent)
+        self.assertEqual(
+            [(r["name"], r["coverage"]) for r in rows], [("solo", "partial-cli")]
+        )
+
     def test_cli_warning_on_stderr_is_partial_coverage(self):
         # codex-cli 0.163.0 exits 0 with empty lists when a remote marketplace
         # answers 401, and reports that only on stderr.
@@ -242,6 +266,68 @@ class CodexDiscoveryTest(unittest.TestCase):
             "version": "1.0.0",
             "source": {"source": "remote"},
         }
+
+    def manifest(self, base, folder, skills):
+        (base / folder).mkdir(parents=True, exist_ok=True)
+        (base / folder / "plugin.json").write_text(
+            json.dumps({"name": "example", "skills": skills}), encoding="utf-8"
+        )
+
+    def test_claude_manifest_is_the_fallback_and_codex_manifest_wins(self):
+        plugin = {
+            "name": "example",
+            "marketplaceName": "catalog",
+            "version": "1.0.0",
+            "source": {"source": "remote"},
+        }
+        base = self.home / "plugins/cache/catalog/example/1.0.0"
+        self.skill(base / "from-claude/a/SKILL.md", "a", "Claude manifest")
+        self.skill(base / "from-codex/b/SKILL.md", "b", "Codex manifest")
+        self.manifest(base, ".claude-plugin", "./from-claude/")
+        rows = discovery.collect_codex(
+            self.home, {"installed": [plugin]}, self.home.parent
+        )
+        self.assertEqual([r["description"] for r in rows], ["Claude manifest"])
+        self.manifest(base, ".codex-plugin", "./from-codex/")
+        rows = discovery.collect_codex(
+            self.home, {"installed": [plugin]}, self.home.parent
+        )
+        self.assertEqual([r["description"] for r in rows], ["Codex manifest"])
+
+    def test_installed_plugin_without_skills_is_a_catalogue_row(self):
+        # Six such plugins on codex-cli 0.163.0 (gmail, github, ...): their
+        # manifests say "skills": null and the cache holds no skills/.
+        (self.home / "plugins/cache/catalog/gmail/1.0.0").mkdir(parents=True)
+        plugin = {
+            "name": "gmail",
+            "marketplaceName": "catalog",
+            "version": "1.0.0",
+            "description": "Mail",
+            "source": {"source": "remote"},
+        }
+        rows = discovery.collect_codex(
+            self.home, {"installed": [plugin]}, self.home.parent
+        )
+        self.assertEqual(
+            [(r["name"], r["installed"], r["description_source"]) for r in rows],
+            [("gmail", True, "catalogue")],
+        )
+
+    def test_available_local_plugin_skills_are_not_installed(self):
+        base = self.home.parent / "source"
+        self.skill(base / "skills/check/SKILL.md", "check", "Available source")
+        rows = discovery.collect_codex(
+            self.home,
+            {
+                "available": [
+                    {"name": "opt", "source": {"source": "local", "path": str(base)}}
+                ]
+            },
+            self.home.parent,
+        )
+        self.assertEqual(
+            [(r["name"], r["installed"]) for r in rows], [("opt:check", False)]
+        )
 
     def test_multi_skill_plugin_qualifies_every_skill(self):
         # codex-cli 0.163.0 lists google-drive with a google-drive skill and

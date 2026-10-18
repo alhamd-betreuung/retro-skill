@@ -106,8 +106,14 @@ class CodexDiscoveryTest(unittest.TestCase):
         self.assertEqual(rows[0]["description"], "Active source")
 
     def test_cache_path_escape_is_not_read(self):
+        # Unguarded, plugins/cache/../bad/../outside resolves to plugins/outside;
+        # the kernel walks each `..` only through directories that exist.
+        for d in ("plugins/cache", "plugins/bad"):
+            (self.home / d).mkdir(parents=True)
         self.skill(
-            self.home / "outside/skills/check/SKILL.md", "outside", "Must not be read"
+            self.home / "plugins/outside/skills/check/SKILL.md",
+            "outside",
+            "Must not be read",
         )
         rows = discovery.collect_codex(
             self.home,
@@ -215,10 +221,70 @@ class CodexDiscoveryTest(unittest.TestCase):
             "assessment",
             "Assessment",
         )
+        # `.system` is Codex's own directory; ~/.agents/skills has none.
+        self.skill(
+            self.home.parent / ".agents/skills/.system/hidden/SKILL.md",
+            "hidden",
+            "Not a Codex system skill",
+        )
         rows = discovery.collect_codex(self.home, {}, self.home.parent)
         self.assertEqual(
             {r["name"] for r in rows}, {"local", "skill-creator", "assessment"}
         )
+
+    def cached_plugin(self, name, skills):
+        base = self.home / f"plugins/cache/catalog/{name}/1.0.0"
+        for skill in skills:
+            self.skill(base / f"skills/{skill}/SKILL.md", skill, f"Skill {skill}")
+        return {
+            "name": name,
+            "marketplaceName": "catalog",
+            "version": "1.0.0",
+            "source": {"source": "remote"},
+        }
+
+    def test_multi_skill_plugin_qualifies_every_skill(self):
+        # codex-cli 0.163.0 lists google-drive with a google-drive skill and
+        # five more; `foo` beside `foo:bar` reads as two plugins.
+        multi = self.cached_plugin("drive", ["drive", "docs"])
+        single = self.cached_plugin("solo", ["solo"])
+        rows = discovery.collect_codex(
+            self.home, {"installed": [multi, single]}, self.home.parent
+        )
+        self.assertEqual(
+            sorted(r["name"] for r in rows), ["drive:docs", "drive:drive", "solo"]
+        )
+
+    def test_null_and_non_string_cli_fields_do_not_crash(self):
+        rows = discovery.collect_codex(
+            self.home,
+            {
+                "available": [
+                    {"name": None, "marketplaceName": None, "description": None},
+                    {"name": "y", "marketplaceName": "m", "source": {"repo": 5}},
+                    {"name": "z", "source": {"url": 7}},
+                ]
+            },
+            self.home.parent,
+        )
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            for key in ("name", "marketplace", "description", "repo_url"):
+                self.assertIsInstance(row[key], str, (key, row))
+
+    def test_plugin_skill_in_standalone_root_keeps_plugin_label(self):
+        base = self.home.parent / ".agents"
+        self.skill(base / "skills/foo/SKILL.md", "foo", "Plugin skill")
+        rows = discovery.collect_codex(
+            self.home,
+            {
+                "installed": [
+                    {"name": "pkg", "source": {"source": "local", "path": str(base)}}
+                ]
+            },
+            self.home.parent,
+        )
+        self.assertEqual([(r["name"], r["plugin"]) for r in rows], [("pkg:foo", "pkg")])
 
     def test_agents_skills_come_from_user_home_not_custom_codex_home(self):
         custom = Path(self.tmp.name) / "elsewhere/codex"

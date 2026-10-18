@@ -337,12 +337,13 @@ def _repo_url(source: Any) -> str:
     if not isinstance(source, dict):
         return ""
     repo = source.get("repo")
-    if repo:
+    if isinstance(repo, str) and repo:
         first = repo.split("/", 1)[0]
         if "://" in repo or repo.startswith("git@") or ":" in first:
             return repo  # already a full URL / SSH spec
         return f"https://github.com/{repo}"
-    return source.get("url") or ""
+    url = source.get("url")
+    return url if isinstance(url, str) else ""
 
 
 def collect(claude_home: Path) -> list[dict[str, Any]]:
@@ -421,7 +422,14 @@ def collect_codex(
     out: list[dict[str, Any]] = []
     seen: set[Path] = set()
 
-    def add(path: Path, plugin: dict[str, Any] | None = None) -> None:
+    def text(value: Any) -> str:
+        # CLI output is third-party data: a JSON null or a number in a text
+        # field must not reach the sort below, where it would raise TypeError.
+        return value if isinstance(value, str) else ""
+
+    def add(
+        path: Path, plugin: dict[str, Any] | None = None, bare: bool = True
+    ) -> None:
         resolved = path.resolve()
         if resolved in seen:
             return
@@ -430,33 +438,32 @@ def collect_codex(
         except OSError:
             return
         seen.add(resolved)
-        skill = fm.get("name") or path.parent.name
+        skill = text(fm.get("name")) or path.parent.name
         plugin = plugin or {}
-        name = plugin.get("name", "")
+        name = text(plugin.get("name"))
         out.append(
             {
-                "name": f"{name}:{skill}" if name and name != skill else skill,
+                # As in `collect`: a multi-skill plugin qualifies every skill,
+                # including the one named like the plugin.
+                "name": f"{name}:{skill}"
+                if name and not (bare and name == skill)
+                else skill,
                 "plugin": name,
                 "skill": skill,
-                "description": fm.get("description", ""),
+                "description": text(fm.get("description")),
                 "description_source": "skill",
-                "catalogue_description": plugin.get("description", ""),
+                "catalogue_description": text(plugin.get("description")),
                 "repo_url": _repo_url(plugin.get("source")),
-                "marketplace": plugin.get("marketplaceName", "codex"),
-                "category": plugin.get("category", ""),
+                "marketplace": text(plugin.get("marketplaceName")) or "codex",
+                "category": text(plugin.get("category")),
                 "installed": plugin.get("installed", True),
                 "path": str(path),
                 "coverage": coverage,
             }
         )
 
-    # One level deep, as the Claude reader reads `skills/*/SKILL.md`: a skill
-    # may ship a SKILL.md template in its own assets, which is not a skill.
-    # Codex keeps its bundled skills in `<codex-home>/skills/.system/`.
-    for root in (codex_home / "skills", user_home / ".agents" / "skills"):
-        for pattern in ("*/SKILL.md", ".system/*/SKILL.md"):
-            for path in sorted(root.glob(pattern)):
-                add(path)
+    # Plugins first: a plugin skill that also sits in a standalone root keeps
+    # its plugin label, and the standalone pass skips it by resolved path.
     for group in ("installed", "available"):
         for entry in plugins.get(group, []):
             if not isinstance(entry, dict) or (
@@ -471,9 +478,7 @@ def collect_codex(
             if source.get("source") == "local" and isinstance(source.get("path"), str):
                 base = Path(source["path"])
             elif group == "installed":
-                parts = [
-                    entry.get(k, "") for k in ("marketplaceName", "name", "version")
-                ]
+                parts = [entry.get(k) for k in ("marketplaceName", "name", "version")]
                 if all(
                     isinstance(p, str)
                     and p not in ("", ".", "..")
@@ -486,23 +491,33 @@ def collect_codex(
                 _skill_files(base, (".codex-plugin", ".claude-plugin")) if base else []
             )
             for path in files:
-                add(path, entry)
+                add(path, entry, bare=len(files) == 1)
             if not files:
                 out.append(
                     {
-                        "name": entry.get("name", ""),
-                        "plugin": entry.get("name", ""),
+                        "name": text(entry.get("name")),
+                        "plugin": text(entry.get("name")),
                         "skill": "",
-                        "description": entry.get("description", ""),
+                        "description": text(entry.get("description")),
                         "description_source": "catalogue",
-                        "catalogue_description": entry.get("description", ""),
+                        "catalogue_description": text(entry.get("description")),
                         "repo_url": _repo_url(source),
-                        "marketplace": entry.get("marketplaceName", "codex"),
-                        "category": entry.get("category", ""),
+                        "marketplace": text(entry.get("marketplaceName")) or "codex",
+                        "category": text(entry.get("category")),
                         "installed": entry["installed"],
                         "coverage": coverage,
                     }
                 )
+    # One level deep, as the Claude reader reads `skills/*/SKILL.md`: a skill
+    # may ship a SKILL.md template in its own assets, which is not a skill.
+    # Codex keeps its bundled skills in `<codex-home>/skills/.system/`.
+    for root, patterns in (
+        (codex_home / "skills", ("*/SKILL.md", ".system/*/SKILL.md")),
+        (user_home / ".agents" / "skills", ("*/SKILL.md",)),
+    ):
+        for pattern in patterns:
+            for path in sorted(root.glob(pattern)):
+                add(path)
     return sorted(out, key=lambda s: (not s["installed"], s["marketplace"], s["name"]))
 
 

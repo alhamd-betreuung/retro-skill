@@ -5,6 +5,7 @@
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,7 +38,7 @@ class CodexDiscoveryTest(unittest.TestCase):
             "global",
             "Shared workflow",
         )
-        rows = discovery.collect_codex(self.home, {})
+        rows = discovery.collect_codex(self.home, {}, self.home.parent)
         self.assertEqual({r["name"] for r in rows}, {"local", "global"})
         self.assertTrue(all(r["installed"] and r["path"] for r in rows))
 
@@ -56,7 +57,9 @@ class CodexDiscoveryTest(unittest.TestCase):
             "enabled": True,
             "source": {"source": "remote"},
         }
-        rows = discovery.collect_codex(self.home, {"installed": [plugin]})
+        rows = discovery.collect_codex(
+            self.home, {"installed": [plugin]}, self.home.parent
+        )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["description"], "Version 1.0.0")
         self.assertIn("/1.0.0/", rows[0]["path"])
@@ -66,7 +69,8 @@ class CodexDiscoveryTest(unittest.TestCase):
         self.skill(base / "skills/check/SKILL.md", "check", "Active source")
         rows = discovery.collect_codex(
             self.home,
-            {
+            user_home=self.home.parent,
+            plugins={
                 "installed": [
                     {
                         "name": "disabled",
@@ -89,7 +93,8 @@ class CodexDiscoveryTest(unittest.TestCase):
         self.assertEqual(rows[0]["repo_url"], "https://github.com/org/optional")
         rows = discovery.collect_codex(
             self.home,
-            {
+            user_home=self.home.parent,
+            plugins={
                 "installed": [
                     {
                         "name": "local-plugin",
@@ -106,7 +111,8 @@ class CodexDiscoveryTest(unittest.TestCase):
         )
         rows = discovery.collect_codex(
             self.home,
-            {
+            user_home=self.home.parent,
+            plugins={
                 "installed": [
                     {
                         "name": "bad",
@@ -122,7 +128,8 @@ class CodexDiscoveryTest(unittest.TestCase):
     def test_non_object_source_remains_catalogue_only(self):
         rows = discovery.collect_codex(
             self.home,
-            {"available": [{"name": "optional", "source": "remote"}]},
+            user_home=self.home.parent,
+            plugins={"available": [{"name": "optional", "source": "remote"}]},
         )
         self.assertEqual(rows[0]["description_source"], "catalogue")
         self.assertFalse(rows[0]["installed"])
@@ -133,7 +140,7 @@ class CodexDiscoveryTest(unittest.TestCase):
             patch.object(discovery.subprocess, "run", side_effect=FileNotFoundError),
             patch("sys.stderr") as stderr,
         ):
-            rows = discovery.codex_catalogue(self.home)
+            rows = discovery.codex_catalogue(self.home, self.home.parent)
         self.assertEqual(rows[0]["coverage"], "standalone-only")
         self.assertTrue(stderr.write.called)
 
@@ -142,7 +149,7 @@ class CodexDiscoveryTest(unittest.TestCase):
             [], 0, json.dumps({"installed": [], "available": []})
         )
         with patch.object(discovery.subprocess, "run", return_value=result) as run:
-            discovery.codex_catalogue(self.home)
+            discovery.codex_catalogue(self.home, self.home.parent)
         self.assertEqual(run.call_args.args[0], ["codex", "plugin", "list", "--json"])
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], str(self.home))
 
@@ -155,8 +162,100 @@ class CodexDiscoveryTest(unittest.TestCase):
                     patch.object(discovery.subprocess, "run", return_value=result),
                     patch("sys.stderr"),
                 ):
-                    rows = discovery.codex_catalogue(self.home)
+                    rows = discovery.codex_catalogue(self.home, self.home.parent)
                 self.assertEqual(rows[0]["coverage"], "standalone-only")
+
+    def test_cli_warning_on_stderr_is_partial_coverage(self):
+        # codex-cli 0.163.0 exits 0 with empty lists when a remote marketplace
+        # answers 401, and reports that only on stderr.
+        self.skill(self.home / "skills/local/SKILL.md", "local", "Local")
+        warning = "Warning: failed to list remote marketplace plugins: 401 Unauthorized"
+        result = subprocess.CompletedProcess(
+            [], 0, json.dumps({"installed": [], "available": []}), warning + "\n"
+        )
+        with (
+            patch.object(discovery.subprocess, "run", return_value=result),
+            patch("sys.stderr") as stderr,
+        ):
+            rows = discovery.codex_catalogue(self.home, self.home.parent)
+        self.assertEqual(rows[0]["coverage"], "partial-cli")
+        written = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn("401 Unauthorized", written)
+
+    def test_only_top_level_and_system_skills_are_standalone_skills(self):
+        self.skill(self.home / "skills/local/SKILL.md", "local", "Local")
+        self.skill(
+            self.home / "skills/.system/skill-creator/SKILL.md",
+            "skill-creator",
+            "Bundled with Codex",
+        )
+        # A skill that ships a SKILL.md template in its assets.
+        self.skill(
+            self.home.parent
+            / ".agents/skills/assessment/assets/skill-template/SKILL.md",
+            "my-skill-name",
+            "Template",
+        )
+        self.skill(
+            self.home.parent / ".agents/skills/assessment/SKILL.md",
+            "assessment",
+            "Assessment",
+        )
+        rows = discovery.collect_codex(self.home, {}, self.home.parent)
+        self.assertEqual(
+            {r["name"] for r in rows}, {"local", "skill-creator", "assessment"}
+        )
+
+    def test_agents_skills_come_from_user_home_not_custom_codex_home(self):
+        custom = Path(self.tmp.name) / "elsewhere/codex"
+        user_home = Path(self.tmp.name) / "home"
+        self.skill(user_home / ".agents/skills/shared/SKILL.md", "shared", "Shared")
+        self.skill(
+            custom.parent / ".agents/skills/unrelated/SKILL.md", "unrelated", "Other"
+        )
+        rows = discovery.collect_codex(custom, {}, user_home)
+        self.assertEqual([r["name"] for r in rows], ["shared"])
+
+    def test_codex_plugin_manifest_declares_skill_directory(self):
+        base = self.home / "plugins/cache/catalog/example/1.0.0"
+        (base / ".codex-plugin").mkdir(parents=True)
+        (base / ".codex-plugin/plugin.json").write_text(
+            json.dumps({"name": "example", "skills": "./custom/"}), encoding="utf-8"
+        )
+        self.skill(base / "custom/check/SKILL.md", "check", "Declared directory")
+        plugin = {
+            "name": "example",
+            "marketplaceName": "catalog",
+            "version": "1.0.0",
+            "source": {"source": "remote"},
+        }
+        rows = discovery.collect_codex(
+            self.home, {"installed": [plugin]}, self.home.parent
+        )
+        self.assertEqual([r["description"] for r in rows], ["Declared directory"])
+
+    def run_script(self, extra_env):
+        env = {
+            "HOME": str(self.home.parent),
+            "PATH": str(self.home.parent / "no-bin"),
+            **extra_env,
+        }
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "skills/retro/scripts/find-org-skills.py")],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
+        return json.loads(out.stdout)
+
+    def test_codex_home_alone_does_not_select_codex(self):
+        self.skill(self.home / "skills/local/SKILL.md", "local", "Local")
+        self.assertEqual(self.run_script({"CODEX_HOME": str(self.home)}), [])
+        rows = self.run_script(
+            {"CODEX_HOME": str(self.home), "CODEX_THREAD_ID": "thread"}
+        )
+        self.assertEqual([r["name"] for r in rows], ["local"])
 
 
 if __name__ == "__main__":

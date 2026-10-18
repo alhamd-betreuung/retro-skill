@@ -17,17 +17,6 @@ readable skill file. The new `retro` installation was included. All rows reporte
 `native-cli-and-local-skills`; the native available-plugin list was empty, which
 does not establish absence of remote organization skills.
 
-The transcript conversion is a separate existing contribution:
-[#168](https://github.com/netresearch/retro-skill/pull/168), head
-`0a094677a6eba120b90ee5a019cd1cdbb414383e`. This discovery change does not
-duplicate that adapter. Its five adapter tests and the detector tests passed
-(141 tests). A real Desktop rollout produced by `codex_work_desktop`, recorded
-as `0.155.0-alpha.9.2`, was converted and fed to the detector: it produced
-nonempty messages and literal nested tool calls without an `exec` wrapper
-command shape. Batched results and computed arguments remain outside that
-adapter's mechanical coverage, as its docstring states. No private transcript
-or source-machine path is included here.
-
 The discovery and existing Claude-discovery tests pass. The full suite passes
 with a canonical temporary directory (722 tests). Under macOS's default aliased temporary
 path, the existing bare-worktree path test also fails in the unmodified adapter
@@ -39,3 +28,13 @@ expression; Minimal Ubuntu's default mawk also fails on the validator's fence
 expression. Temporary extracted GNU awk packages were used for the check,
 without changing system packages. Markdown lint, Ruff, whitespace and version
 parity hooks passed on macOS.
+
+## Linux re-check
+
+Checked on Linux (WSL2) on 2026-10-18 with `codex-cli 0.163.0` after the review
+fixes. The inventory returned 152 entries, 146 with readable skill paths, all
+`native-cli-and-local-skills`; the CLI wrote nothing to stderr. The one entry
+dropped against the earlier reader was `my-skill-name`, a template at
+`~/.agents/skills/automated-assessment/assets/skill-template/SKILL.md`. The 13
+plugin directories in the Codex cache all carry `.codex-plugin/plugin.json`; the ones with
+skills declare `"skills": "./skills/"`.

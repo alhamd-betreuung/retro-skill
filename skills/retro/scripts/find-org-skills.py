@@ -11,9 +11,10 @@ known_marketplaces.json) and each one's locally-cloned catalogue
 entries are actually installed (~/.claude/plugins/installed_plugins.json, with
 the plugin cache as fallback).
 
-On Codex, reads `codex plugin list --json` plus standalone `.codex/skills`
-and sibling `.agents/skills`. Uses the CLI's recorded enabled plugin version;
-missing CLI coverage is reported as standalone-only, not a complete catalogue.
+On Codex, reads `codex plugin list --json` plus standalone skills in
+`<codex-home>/skills` and `~/.agents/skills`. Uses the CLI's recorded enabled
+plugin version; a CLI that cannot be read is reported as standalone-only, and a
+CLI answer with a warning on stderr as partial-cli, not a complete catalogue.
 
 Two descriptions exist for a skill, written for two readers. The catalogue
 `description` is a listing summary for a human browsing plugins. The
@@ -272,14 +273,22 @@ def _plain_scalar(raw: str) -> str:
     return (raw[: m.start()] if m else raw).strip()
 
 
-def _skill_files(install_path: Path) -> list[Path]:
+def _skill_files(
+    install_path: Path, manifest_dirs: tuple[str, ...] = (".claude-plugin",)
+) -> list[Path]:
     """Every SKILL.md a plugin ships, honouring its manifest's `skills` field.
 
     `.claude-plugin/plugin.json` may point at skill directories explicitly
     (`["./skills/x"]`) or at one directory holding several (`"./.claude/skills/"`);
     without a manifest entry the spec default `skills/*/SKILL.md` applies.
+    Codex plugins keep the same manifest in `.codex-plugin/plugin.json`; the
+    first manifest directory in `manifest_dirs` that holds one is read.
     """
-    manifest = _load_json(install_path / ".claude-plugin" / "plugin.json")
+    manifest = None
+    for manifest_dir in manifest_dirs:
+        manifest = _load_json(install_path / manifest_dir / "plugin.json")
+        if isinstance(manifest, dict):
+            break
     declared = manifest.get("skills") if isinstance(manifest, dict) else None
     if isinstance(declared, str):
         declared = [declared]
@@ -402,7 +411,12 @@ def collect(claude_home: Path) -> list[dict[str, Any]]:
     return out
 
 
-def collect_codex(codex_home: Path, plugins: dict[str, Any]) -> list[dict[str, Any]]:
+def collect_codex(
+    codex_home: Path,
+    plugins: dict[str, Any],
+    user_home: Path,
+    coverage: str = "native-cli-and-local-skills",
+) -> list[dict[str, Any]]:
     """Native CLI catalogue plus standalone skills; never guess cache versions."""
     out: list[dict[str, Any]] = []
     seen: set[Path] = set()
@@ -432,13 +446,16 @@ def collect_codex(codex_home: Path, plugins: dict[str, Any]) -> list[dict[str, A
                 "category": plugin.get("category", ""),
                 "installed": plugin.get("installed", True),
                 "path": str(path),
-                "coverage": "native-cli-and-local-skills",
+                "coverage": coverage,
             }
         )
 
-    for root in (codex_home / "skills", codex_home.parent / ".agents" / "skills"):
-        if root.is_dir():
-            for path in sorted(root.rglob("SKILL.md")):
+    # One level deep, as the Claude reader reads `skills/*/SKILL.md`: a skill
+    # may ship a SKILL.md template in its own assets, which is not a skill.
+    # Codex keeps its bundled skills in `<codex-home>/skills/.system/`.
+    for root in (codex_home / "skills", user_home / ".agents" / "skills"):
+        for pattern in ("*/SKILL.md", ".system/*/SKILL.md"):
+            for path in sorted(root.glob(pattern)):
                 add(path)
     for group in ("installed", "available"):
         for entry in plugins.get(group, []):
@@ -465,7 +482,9 @@ def collect_codex(codex_home: Path, plugins: dict[str, Any]) -> list[dict[str, A
                     for p in parts
                 ):
                     base = codex_home / "plugins" / "cache" / Path(*parts)
-            files = _skill_files(base) if base else []
+            files = (
+                _skill_files(base, (".codex-plugin", ".claude-plugin")) if base else []
+            )
             for path in files:
                 add(path, entry)
             if not files:
@@ -481,13 +500,13 @@ def collect_codex(codex_home: Path, plugins: dict[str, Any]) -> list[dict[str, A
                         "marketplace": entry.get("marketplaceName", "codex"),
                         "category": entry.get("category", ""),
                         "installed": entry["installed"],
-                        "coverage": "native-cli-and-local-skills",
+                        "coverage": coverage,
                     }
                 )
     return sorted(out, key=lambda s: (not s["installed"], s["marketplace"], s["name"]))
 
 
-def codex_catalogue(codex_home: Path) -> list[dict[str, Any]]:
+def codex_catalogue(codex_home: Path, user_home: Path) -> list[dict[str, Any]]:
     try:
         result = subprocess.run(
             ["codex", "plugin", "list", "--json"],
@@ -510,11 +529,15 @@ def codex_catalogue(codex_home: Path) -> list[dict[str, Any]]:
             f"Codex plugin catalogue unavailable ({type(exc).__name__}); standalone skills only.",
             file=sys.stderr,
         )
-        skills = collect_codex(codex_home, {})
-        for skill in skills:
-            skill["coverage"] = "standalone-only"
-        return skills
-    return collect_codex(codex_home, plugins)
+        return collect_codex(codex_home, {}, user_home, "standalone-only")
+    # The CLI exits 0 with an empty remote list when a marketplace cannot be
+    # read (a 401, for example) and says so only on stderr; that answer is
+    # partial, so it is forwarded and labelled as such.
+    warning = (result.stderr or "").strip()
+    if warning:
+        print(f"Codex plugin catalogue incomplete: {warning}", file=sys.stderr)
+        return collect_codex(codex_home, plugins, user_home, "partial-cli")
+    return collect_codex(codex_home, plugins, user_home)
 
 
 def main() -> int:
@@ -527,19 +550,20 @@ def main() -> int:
 
     host = args.host
     if host == "auto":
+        # CODEX_THREAD_ID is set per Codex session. CODEX_HOME is a persistent
+        # user variable and may be exported on a host running Claude Code.
         host = (
             "claude"
             if args.claude_home
             else "codex"
-            if args.codex_home
-            or os.environ.get("CODEX_THREAD_ID")
-            or os.environ.get("CODEX_HOME")
+            if args.codex_home or os.environ.get("CODEX_THREAD_ID")
             else "claude"
         )
     skills = (
         codex_catalogue(
             args.codex_home
-            or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+            or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))),
+            Path.home(),
         )
         if host == "codex"
         else collect(args.claude_home or Path.home() / ".claude")

@@ -165,6 +165,20 @@ class CodexDiscoveryTest(unittest.TestCase):
                     rows = discovery.codex_catalogue(self.home, self.home.parent)
                 self.assertEqual(rows[0]["coverage"], "standalone-only")
 
+    def test_failed_cli_forwards_its_stderr(self):
+        self.skill(self.home / "skills/local/SKILL.md", "local", "Local")
+        error = subprocess.CalledProcessError(
+            2, ["codex"], output="", stderr="error: not logged in\n"
+        )
+        with (
+            patch.object(discovery.subprocess, "run", side_effect=error),
+            patch("sys.stderr") as stderr,
+        ):
+            rows = discovery.codex_catalogue(self.home, self.home.parent)
+        self.assertEqual(rows[0]["coverage"], "standalone-only")
+        written = "".join(c.args[0] for c in stderr.write.call_args_list)
+        self.assertIn("not logged in", written)
+
     def test_cli_warning_on_stderr_is_partial_coverage(self):
         # codex-cli 0.163.0 exits 0 with empty lists when a remote marketplace
         # answers 401, and reports that only on stderr.
